@@ -1,0 +1,214 @@
+#!/bin/bash
+#
+# devpkgcheck : Tool that builds and tests pkgbuilds with vcs sources from the AUR
+#
+# Copyright (C) 2016 Maxim Andersson <thesilentboatman@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+#
+
+umask 077
+
+readonly name='devpkgcheck'
+readonly version=0.9
+
+readonly aur_rpc_url="https://aur.archlinux.org/rpc.php?type=msearch&arg="
+readonly aur_snapshot_url="https://aur.archlinux.org/cgit/aur.git/snapshot/"
+
+temp_dir=$( mktemp -d --tmpdir ${name}.XXXXXXXXXX 2>/dev/null ) || failed "failed to create temp dir"
+
+cache_dir=${XDG_CACHE_HOME:-~/.cache}/${name}
+global_config_file="/etc/${name}.conf"
+local_config_file=${XDG_CONFIG_HOME:-~/.config}/${name}.conf
+
+use_color=1
+
+version() {
+    echo "${name} ${version}"
+}
+
+usage() {
+    echo "${name} ${version}"
+    echo
+    echo "Tool that builds and tests pkgbuilds with vcs sources from the AUR"
+    echo
+    echo "Usage: ${name} [options]"
+    echo
+    echo "  -h, --help             show this help message and exit"
+    echo "      --nocolor          disable colorized output messages"
+    echo "  -q, --quiet            show less information"
+    echo "  -u, --user <usr>       get pkg names from specified AUR user"
+    echo "  -V, --version          show version and exit"
+    echo
+    echo "The config file can be found at ${global_config_file}"
+    echo "or ${local_config_file}"
+    echo
+}
+
+set_color_output() {
+    if [[ -t 2 ]] && (( use_color )); then
+        # prefer terminal safe colored and bold text when tput is supported
+        if tput setaf 0 &>/dev/null; then
+            all_off="$(tput sgr0)"
+            bold="$(tput bold)"
+            blue="${bold}$(tput setaf 4)"
+            green="${bold}$(tput setaf 2)"
+            red="${bold}$(tput setaf 1)"
+            yellow="${bold}$(tput setaf 3)"
+        else
+            all_off="\e[0m"
+            bold="\e[1m"
+            blue="${bold}\e[34m"
+            green="${bold}\e[32m"
+            red="${bold}\e[31m"
+            yellow="${bold}\e[33m"
+        fi
+    fi
+}
+
+print_name() {
+    (( quiet )) && return
+    printf "${blue}[${all_off}${bold}${pkg}${blue}]${all_off} "
+}
+
+print_append() {
+    (( quiet )) && return
+    printf "${blue}${*}${all_off} "
+}
+
+print_newline() {
+    (( quiet )) && return
+    printf "\n"
+}
+
+warning() {
+    (( quiet )) && printf "[${pkg}] "
+    printf "${yellow}==> WARNING:${all_off}${bold} ${*}${all_off}\n"
+}
+
+error() {
+    (( quiet )) && printf "[${pkg}] "
+    printf "${red}==> ERROR:${all_off}${bold} ${*}${all_off}\n"
+}
+
+failed() {
+    echo "${name}: ${*}" >&2
+    exit 1
+}
+
+check_args() {
+	PARAM=$(getopt --options hqu:V \
+			--longoptions help,nocolor,user:,quiet,version \
+			--name "$0" -- "$@")
+
+	[[ $? != 0 ]] && exit 1
+
+	eval set -- "$PARAM"
+
+	while true; do
+		case $1 in
+			-h|--help) usage && exit 0 ;;
+               --nocolor) use_color=0 ;;
+			-q|--quiet) quiet=1; use_color=0 ;;
+			-u|--user) aur_user=$2; shift ;;
+			-V|--version) version && exit 0 ;;
+			--) shift; break ;;
+			*) failed "error while parsing flag $1" ;;
+		esac
+		shift
+	done
+}
+
+# source configs
+[[ -f "${global_config_file}" ]] && source "${global_config_file}"
+[[ -f "${local_config_file}" ]] && source "${local_config_file}"
+
+temp_dir+="/${name}"
+
+# if dir already exists we need to test if it's writable
+mkdir -p "${cache_dir}" 2>/dev/null \
+    && [[ -w "${cache_dir}" ]] \
+    || failed "unable to write to cache dir"
+mkdir -p "${temp_dir}" 2>/dev/null \
+    && [[ -w "${temp_dir}" ]] \
+    || failed "unable to write to temp dir"
+
+trap 'rm -rf "${temp_dir}"' EXIT
+
+check_args "$@"
+set_color_output
+
+# download pkg names
+user_pkgs=$( curl -s "${aur_rpc_url}${aur_user}" | \grep -Po '"Name":.*?[^\\],' | \cut -f4 -d\" | \grep -E '\-git$|\-hg$|\-bzr$|\-svn$' | sort )
+
+# validate
+[[ "${aur_user}" ]] || failed "aur username is not set"
+[[ "${user_pkgs}" ]] || failed "no packages found"
+[[ "${temp_dir}" ]] || failed "temp dir not set"
+
+for pkg in ${user_pkgs[@]}; do
+    cd "${temp_dir}"
+
+    [[ "${ignore_pkgs}" =~ "${pkg}" ]] && continue
+
+    print_name
+
+    print_append "fetch"
+    wget --quiet ${aur_snapshot_url}${pkg}.tar.gz
+
+    if [[ $? != 0 ]]; then
+        error "fetch failed"
+        continue
+    fi
+    
+    tar -xzf ${pkg}.tar.gz
+    cd ${pkg}
+
+    print_append ". makepkg"
+    makepkg -Acd &> "${pkg}_makepkg_output"
+
+    if [[ $? != 0 ]]; then
+        error "makepkg failed"
+        continue
+    fi
+    
+    print_append ". namcap"
+    namcap *".pkg.tar.xz" &> "${pkg}_namcap_output"
+    
+    if [[ $? != 0 ]]; then
+        error "namcap failed"
+        continue
+    fi
+
+    # sort namcap output to be able to compare it
+    cat "${pkg}_namcap_output" | tr \' '\n' | sort > "${pkg}_namcap_output_scrambled"
+     
+    if [[ -f "${cache_dir}/${pkg}" ]]; then
+        diff -u "${cache_dir}/${pkg}" "${pkg}_namcap_output_scrambled" > "${pkg}_namcap_diff"
+        
+        if [[ $? != 0 ]]; then
+            warning "namcap output changed"
+        else
+            print_newline
+        fi
+    elif [[ -s "${pkg}_namcap_output_scrambled" ]]; then
+        warning "namcap has output"
+    else
+        print_newline
+    fi
+
+    mv -f "${pkg}_namcap_output_scrambled" "${cache_dir}/${pkg}" 2>/dev/null
+done
+
+# vim:set ts=4 sw=4 et:
