@@ -154,7 +154,7 @@ user_pkgs=$( curl -s "${aur_rpc_url}${aur_user}" | \grep -Po '"Name":.*?[^\\],' 
 
 # validate
 [[ "${aur_user}" ]] || failed "aur username is not set"
-[[ "${user_pkgs}" ]] || failed "no packages found"
+[[ "${user_pkgs}" ]] || failed "no packages found for user ${aur_user}"
 [[ "${temp_dir}" ]] || failed "temp dir not set"
 
 for pkg in ${user_pkgs[@]}; do
