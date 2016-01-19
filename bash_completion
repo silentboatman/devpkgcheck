@@ -1,0 +1,17 @@
+# devpkgcheck bash completion
+
+_devpkgcheck()
+{
+	local cur prev words cword
+	_init_completion || return
+
+	case $prev in
+		-h|--help|-u|--user|-V|--version)
+			return
+			;;
+	esac
+
+	COMPREPLY=( $(compgen -W '$( _parse_help "$1" )' -- "${cur}") )
+}
+
+complete -F _devpkgcheck devpkgcheck
