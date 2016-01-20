@@ -21,7 +21,7 @@
 umask 077
 
 readonly name='devpkgcheck'
-readonly version=1.0
+readonly version=1.1
 
 readonly aur_rpc_url="https://aur.archlinux.org/rpc.php?type=msearch&arg="
 readonly aur_snapshot_url="https://aur.archlinux.org/cgit/aur.git/snapshot/"
