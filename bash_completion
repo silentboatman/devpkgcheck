@@ -9,6 +9,10 @@ _devpkgcheck()
 		-h|--help|-u|--user|-V|--version)
 			return
 			;;
+		-d|--dir)
+			_filedir
+			return
+			;;
 	esac
 
 	COMPREPLY=( $(compgen -W '$( _parse_help "$1" )' -- "${cur}") )

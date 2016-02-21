@@ -26,7 +26,7 @@ readonly version=1.1
 readonly aur_rpc_url="https://aur.archlinux.org/rpc.php?type=msearch&arg="
 readonly aur_snapshot_url="https://aur.archlinux.org/cgit/aur.git/snapshot/"
 
-temp_dir=$( mktemp -d --tmpdir ${name}.XXXXXXXXXX 2>/dev/null ) || failed "failed to create temp dir"
+readonly vcs_types="\-git$|\-hg$|\-bzr$|\-svn$"
 
 cache_dir=${XDG_CACHE_HOME:-~/.cache}/${name}
 global_config_file="/etc/${name}.conf"
@@ -45,10 +45,11 @@ usage() {
     echo
     echo "Usage: ${name} [options]"
     echo
+    echo "  -d, --dir <dir>        get pkgbuilds from a specified dir"
     echo "  -h, --help             show this help message and exit"
     echo "      --nocolor          disable colorized output messages"
     echo "  -q, --quiet            show less information"
-    echo "  -u, --user <usr>       get pkg names from specified AUR user"
+    echo "  -u, --user <usr>       get pkgbuilds from a specified AUR user"
     echo "  -V, --version          show version and exit"
     echo
     echo "The config file can be found at ${global_config_file}"
@@ -108,33 +109,39 @@ failed() {
 }
 
 check_args() {
-	PARAM=$(getopt --options hqu:V \
-			--longoptions help,nocolor,user:,quiet,version \
-			--name "$0" -- "$@")
+    PARAM=$(getopt --options d:hqu:V \
+        --longoptions dir:,help,nocolor,user:,quiet,version \
+        --name "$0" -- "$@")
 
-	[[ $? != 0 ]] && exit 1
+    [[ $? != 0 ]] && exit 1
 
-	eval set -- "$PARAM"
+    eval set -- "$PARAM"
 
-	while true; do
-		case $1 in
-			-h|--help) usage && exit 0 ;;
-               --nocolor) use_color=0 ;;
-			-q|--quiet) quiet=1; use_color=0 ;;
-			-u|--user) aur_user=$2; shift ;;
-			-V|--version) version && exit 0 ;;
-			--) shift; break ;;
-			*) failed "error while parsing flag $1" ;;
-		esac
-		shift
-	done
+    while true; do
+        case $1 in
+            -d|--dir) local_pkgdir=$(readlink -m "$2"); shift ;;
+            -h|--help) usage && exit 0 ;;
+            --nocolor) use_color=0 ;;
+            -q|--quiet) quiet=1; use_color=0 ;;
+            -u|--user) aur_user=$2; local_pkgdir=""; shift ;;
+            -V|--version) version && exit 0 ;;
+            --) shift; break ;;
+            *) failed "error while parsing flag $1" ;;
+        esac
+        shift
+    done
 }
 
 # source configs
-[[ -f "${global_config_file}" ]] && source "${global_config_file}"
-[[ -f "${local_config_file}" ]] && source "${local_config_file}"
+[[ -r "${global_config_file}" ]] && source "${global_config_file}"
+[[ -r "${local_config_file}" ]] && source "${local_config_file}"
 
-temp_dir+="/${name}"
+# add an extra dir so we don't remove other stuff
+[[ ${temp_dir} ]] \
+    && temp_dir+="/${name}" \
+    || temp_dir=$( mktemp -d --tmpdir "${name}.XXXXXXXXXX" 2>/dev/null )
+
+trap 'rm -rf "${temp_dir}"' EXIT
 
 # if dir already exists we need to test if it's writable
 mkdir -p "${cache_dir}" 2>/dev/null \
@@ -144,48 +151,74 @@ mkdir -p "${temp_dir}" 2>/dev/null \
     && [[ -w "${temp_dir}" ]] \
     || failed "unable to write to temp dir"
 
-trap 'rm -rf "${temp_dir}"' EXIT
-
 check_args "$@"
 set_color_output
 
-# download pkg names
-user_pkgs=$( curl -s "${aur_rpc_url}${aur_user}" | \grep -Po '"Name":.*?[^\\],' | \cut -f4 -d\" | \grep -E '\-git$|\-hg$|\-bzr$|\-svn$' | sort )
+# get pkg names
+if [[ ${local_pkgdir} ]]; then
+    declare -A pkg_dirs
+    declare -a user_pkgs
+
+    pkgs_dirs=$( find "${local_pkgdir/#\~/$HOME}" -name PKGBUILD -type f -exec dirname '{}' ';' 2>/dev/null | grep -E ${vcs_types} | sort )
+
+    for dir in ${pkgs_dirs[@]}; do
+        pkg_dirs[$(basename "${dir}")]="${dir}"
+        user_pkgs+=("$(basename "${dir}")")
+    done
+else
+    user_pkgs=$( curl -s "${aur_rpc_url}${aur_user}" | grep -Po '"Name":.*?[^\\],' | cut -f4 -d\" | grep -E ${vcs_types} | sort )
+fi
 
 # validate
-[[ "${aur_user}" ]] || failed "aur username is not set"
-[[ "${user_pkgs}" ]] || failed "no packages found for user ${aur_user}"
+[[ "${aur_user}" || "${local_pkgdir}" ]] || failed "aur username is not set"
 [[ "${temp_dir}" ]] || failed "temp dir not set"
 
+if [[ ! "${user_pkgs}" ]]; then
+    [[ "${local_pkgdir}" ]] \
+        && failed "no packages found in dir ${local_pkgdir}" \
+        || failed "no packages found for user ${aur_user}"
+fi
+
+# check pkgs
 for pkg in ${user_pkgs[@]}; do
     cd "${temp_dir}"
 
     [[ "${ignore_pkgs}" =~ "${pkg}" ]] && continue
 
     print_name
-
     print_append "fetch"
-    wget --quiet ${aur_snapshot_url}${pkg}.tar.gz
 
-    if [[ $? != 0 ]]; then
-        error "fetch failed"
-        continue
+    if [[ ${local_pkgdir} ]]; then
+        cp -r "${pkg_dirs[${pkg}]}" . 2>/dev/null
+
+        if [[ $? != 0 ]]; then
+            error "unable to read pkg dir"
+            continue
+        fi
+    else
+        wget --quiet "${aur_snapshot_url}${pkg}.tar.gz"
+
+        if [[ $? != 0 ]]; then
+            error "fetch failed"
+            continue
+        fi
+
+        tar -xzf "${pkg}.tar.gz"
     fi
-    
-    tar -xzf ${pkg}.tar.gz
-    cd ${pkg}
+
+    cd "${pkg}"
 
     print_append ". makepkg"
-    makepkg -Acd &> "${pkg}_makepkg_output"
+    makepkg -Acdf &> "${pkg}_makepkg_output"
 
     if [[ $? != 0 ]]; then
         error "makepkg failed"
         continue
     fi
-    
+
     print_append ". namcap"
     namcap *".pkg.tar.xz" &> "${pkg}_namcap_output"
-    
+
     if [[ $? != 0 ]]; then
         error "namcap failed"
         continue
@@ -193,10 +226,10 @@ for pkg in ${user_pkgs[@]}; do
 
     # sort namcap output to be able to compare it
     cat "${pkg}_namcap_output" | tr \' '\n' | sort > "${pkg}_namcap_output_scrambled"
-     
+
     if [[ -f "${cache_dir}/${pkg}" ]]; then
         diff -u "${cache_dir}/${pkg}" "${pkg}_namcap_output_scrambled" > "${pkg}_namcap_diff"
-        
+
         if [[ $? != 0 ]]; then
             warning "namcap output changed"
         else
