@@ -1,3 +1,8 @@
+## [gitlab]
+
+Updated code at https://gitlab.com/silentboatman/devpkgcheck
+<br><br>
+
 # devpkgcheck
 
 Tool that builds and tests pkgbuilds with vcs sources from the AUR.
